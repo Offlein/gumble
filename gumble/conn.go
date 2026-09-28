@@ -4,13 +4,14 @@ import (
 	"encoding/binary"
 	"errors"
 	"io"
+	"math"
 	"net"
 	"sync"
 	"time"
 
 	"github.com/golang/protobuf/proto"
-	"layeh.com/gumble/gumble/MumbleProto"
-	"layeh.com/gumble/gumble/varint"
+	"github.com/talkkonnect/gumble/gumble/MumbleProto"
+	"github.com/talkkonnect/gumble/gumble/varint"
 )
 
 // DefaultPort is the default port on which Mumble servers listen.
@@ -63,11 +64,19 @@ func (c *Conn) ReadPacket() (uint16, []byte, error) {
 
 // WriteAudio writes an audio packet to the connection.
 func (c *Conn) WriteAudio(format, target byte, sequence int64, final bool, data []byte, X, Y, Z *float32) error {
+	packet, err := makeAudioPacket(format, target, sequence, final, data, X, Y, Z)
+	if err != nil {
+		return err
+	}
+	return c.WritePacket(1, packet)
+}
+
+func makeAudioPacket(format, target byte, sequence int64, final bool, data []byte, X, Y, Z *float32) ([]byte, error) {
 	var buff [1 + varint.MaxVarintLen*2]byte
 	buff[0] = (format << 5) | target
 	n := varint.Encode(buff[1:], sequence)
 	if n == 0 {
-		return errors.New("gumble: varint out of range")
+		return nil, errors.New("gumble: varint out of range")
 	}
 	l := int64(len(data))
 	if final {
@@ -75,7 +84,7 @@ func (c *Conn) WriteAudio(format, target byte, sequence int64, final bool, data 
 	}
 	m := varint.Encode(buff[1+n:], l)
 	if m == 0 {
-		return errors.New("gumble: varint out of range")
+		return nil, errors.New("gumble: varint out of range")
 	}
 	header := buff[:1+n+m]
 
@@ -84,32 +93,15 @@ func (c *Conn) WriteAudio(format, target byte, sequence int64, final bool, data 
 		positionalLength = 3 * 4
 	}
 
-	c.Lock()
-	defer c.Unlock()
-
-	if err := c.writeHeader(1, uint32(len(header)+len(data)+positionalLength)); err != nil {
-		return err
-	}
-	if _, err := c.Conn.Write(header); err != nil {
-		return err
-	}
-	if _, err := c.Conn.Write(data); err != nil {
-		return err
-	}
-
+	packet := make([]byte, len(header)+len(data)+positionalLength)
+	offset := copy(packet, header)
+	offset += copy(packet[offset:], data)
 	if positionalLength > 0 {
-		if err := binary.Write(c.Conn, binary.LittleEndian, *X); err != nil {
-			return err
-		}
-		if err := binary.Write(c.Conn, binary.LittleEndian, *Y); err != nil {
-			return err
-		}
-		if err := binary.Write(c.Conn, binary.LittleEndian, *Z); err != nil {
-			return err
-		}
+		binary.LittleEndian.PutUint32(packet[offset:], math.Float32bits(*X))
+		binary.LittleEndian.PutUint32(packet[offset+4:], math.Float32bits(*Y))
+		binary.LittleEndian.PutUint32(packet[offset+8:], math.Float32bits(*Z))
 	}
-
-	return nil
+	return packet, nil
 }
 
 // WritePacket writes a data packet of the given type to the connection.

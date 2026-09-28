@@ -6,11 +6,14 @@ import (
 	"math"
 	"net"
 	"runtime"
+	"sync"
 	"sync/atomic"
 	"time"
 
 	"github.com/golang/protobuf/proto"
-	"layeh.com/gumble/gumble/MumbleProto"
+	"github.com/talkkonnect/gumble/gumble/MumbleProto"
+	"github.com/talkkonnect/gumble/gumble/cryptstate"
+	"github.com/talkkonnect/gumble/gumble/varint"
 )
 
 // State is the current state of the client's connection to the server.
@@ -31,7 +34,7 @@ const (
 )
 
 // ClientVersion is the protocol version that Client implements.
-const ClientVersion = 1<<16 | 3<<8 | 0
+const ClientVersion = 1<<16 | 4<<8 | 0
 
 // Client is the type used to create a connection to a server.
 type Client struct {
@@ -54,6 +57,14 @@ type Client struct {
 	tcpPingTimes       [12]float32
 	tcpPingAvg         uint32
 	tcpPingVar         uint32
+
+	udpMu      sync.Mutex
+	udpConn    *net.UDPConn
+	udpCrypt   cryptstate.State
+	udpStarted uint32
+	udpActive  uint32
+	udpPackets uint32
+	udpResync  int64
 
 	// A collection containing the server's context actions.
 	ContextActions ContextActions
@@ -112,6 +123,17 @@ func DialWithDialer(dialer *net.Dialer, addr string, config *Config, tlsConfig *
 		connect: make(chan *RejectError),
 		end:     make(chan struct{}),
 	}
+	if !config.ForceTCP {
+		// UDP is optional: leave the control connection alive and use TCP
+		// tunneling if a UDP socket cannot be opened.
+		if udpConn, udpErr := dialer.Dial("udp", addr); udpErr == nil {
+			if conn, ok := udpConn.(*net.UDPConn); ok {
+				client.udpConn = conn
+			} else {
+				udpConn.Close()
+			}
+		}
+	}
 
 	go client.readRoutine()
 
@@ -155,10 +177,12 @@ func DialWithDialer(dialer *net.Dialer, addr string, config *Config, tlsConfig *
 	select {
 	case <-timeout:
 		client.Conn.Close()
+		client.closeUDP()
 		return nil, errors.New("gumble: synchronization timeout")
 	case err := <-client.connect:
 		if err != nil {
 			client.Conn.Close()
+			client.closeUDP()
 			return nil, err
 		}
 
@@ -213,6 +237,7 @@ func (c *Client) pingRoutine() {
 		tcpPingAvg = math.Float32frombits(atomic.LoadUint32(&c.tcpPingAvg))
 		tcpPingVar = math.Float32frombits(atomic.LoadUint32(&c.tcpPingVar))
 		c.Conn.WriteProto(&packet)
+		c.sendUDPPing(timestamp)
 
 		select {
 		case <-c.end:
@@ -242,10 +267,106 @@ func (c *Client) readRoutine() {
 
 	wasSynced := c.State() == StateSynced
 	atomic.StoreUint32(&c.state, uint32(StateDisconnected))
+	c.closeUDP()
 	close(c.end)
 	if wasSynced {
 		c.Config.Listeners.onDisconnect(&c.disconnectEvent)
 	}
+}
+
+func (c *Client) startUDP() {
+	if c.Config.ForceTCP || c.udpConn == nil || !atomic.CompareAndSwapUint32(&c.udpStarted, 0, 1) {
+		return
+	}
+	go c.udpRoutine()
+	// Associate our UDP source port as soon as CryptSetup completes instead of
+	// waiting for the next five-second control ping.
+	c.sendUDPPing(uint64(time.Now().UnixNano()))
+}
+
+func (c *Client) closeUDP() {
+	c.udpMu.Lock()
+	defer c.udpMu.Unlock()
+	if c.udpConn != nil {
+		_ = c.udpConn.Close()
+		c.udpConn = nil
+	}
+}
+
+func (c *Client) udpRoutine() {
+	var packet [65535]byte
+	for {
+		c.udpMu.Lock()
+		conn := c.udpConn
+		c.udpMu.Unlock()
+		if conn == nil {
+			return
+		}
+		n, err := conn.Read(packet[:])
+		if err != nil {
+			return
+		}
+		plain, err := c.udpCrypt.Decrypt(packet[:n])
+		if err != nil {
+			// UDP is lossy. Ignore invalid or stale datagrams; a later valid
+			// packet re-establishes the path without harming TLS/TCP. Request a
+			// nonce refresh at most once per five seconds.
+			c.requestCryptResync()
+			continue
+		}
+		atomic.StoreUint32(&c.udpActive, 1)
+		atomic.AddUint32(&c.udpPackets, 1)
+		_ = c.handleUDPPacket(plain)
+	}
+}
+
+func (c *Client) requestCryptResync() {
+	now := time.Now().Unix()
+	last := atomic.LoadInt64(&c.udpResync)
+	if now-last < 5 || !atomic.CompareAndSwapInt64(&c.udpResync, last, now) {
+		return
+	}
+	_ = c.Conn.WriteProto(&MumbleProto.CryptSetup{})
+}
+
+func (c *Client) sendUDPPing(timestamp uint64) {
+	if c.Config.ForceTCP || !c.udpCrypt.Ready() {
+		return
+	}
+	var payload [1 + varint.MaxVarintLen]byte
+	payload[0] = 0x20 // Mumble UDP Ping
+	n := varint.Encode(payload[1:], int64(timestamp))
+	if n > 0 {
+		_ = c.sendUDP(payload[:1+n])
+	}
+}
+
+func (c *Client) sendUDP(payload []byte) error {
+	c.udpMu.Lock()
+	defer c.udpMu.Unlock()
+	if c.udpConn == nil {
+		return errors.New("gumble: UDP transport is unavailable")
+	}
+	ciphertext, err := c.udpCrypt.Encrypt(payload)
+	if err != nil {
+		return err
+	}
+	_, err = c.udpConn.Write(ciphertext)
+	return err
+}
+
+func (c *Client) writeAudio(format, target byte, sequence int64, final bool, data []byte, x, y, z *float32) error {
+	payload, err := makeAudioPacket(format, target, sequence, final, data, x, y, z)
+	if err != nil {
+		return err
+	}
+	if !c.Config.ForceTCP && atomic.LoadUint32(&c.udpActive) == 1 {
+		if err := c.sendUDP(payload); err == nil {
+			return nil
+		}
+		atomic.StoreUint32(&c.udpActive, 0)
+	}
+	return c.Conn.WritePacket(1, payload)
 }
 
 // RequestUserList requests that the server's registered user list be sent to
@@ -270,6 +391,7 @@ func (c *Client) Disconnect() error {
 	}
 	c.disconnectEvent.Type = DisconnectUser
 	c.Conn.Close()
+	c.closeUDP()
 	return nil
 }
 

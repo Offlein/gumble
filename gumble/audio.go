@@ -69,7 +69,7 @@ func (a AudioBuffer) writeAudio(client *Client, seq int64, final bool) error {
 		targetID = byte(target.ID)
 	}
 	// TODO: re-enable positional audio
-	return client.Conn.WriteAudio(byte(4), targetID, seq, final, raw, nil, nil, nil)
+	return client.writeAudio(byte(4), targetID, seq, final, raw, nil, nil, nil)
 }
 
 // AudioPacket contains incoming audio samples and information.
@@ -79,6 +79,12 @@ type AudioPacket struct {
 	Target *VoiceTarget
 
 	AudioBuffer
+
+	// OpusPayload is the raw compressed Opus frame from the network packet.
+	// It is used by TalkKonnect's multicast forwarding path.
+	OpusPayload []byte
+	// Sequence is the low 16 bits of the Mumble packet sequence number.
+	Sequence uint16
 
 	HasPosition bool
 	X, Y, Z     float32

@@ -1,16 +1,15 @@
-package gumbleffmpeg
+package gumbleffmpeg // import "github.com/talkkonnect/gumble/gumbleffmpeg"
 
 import (
 	"encoding/binary"
 	"errors"
+	"github.com/talkkonnect/gumble/gumble"
 	"io"
 	"os/exec"
 	"strconv"
 	"sync"
 	"sync/atomic"
 	"time"
-
-	"layeh.com/gumble/gumble"
 )
 
 // State represents the state of a Stream.
@@ -51,10 +50,10 @@ type Stream struct {
 }
 
 // New returns a new Stream for the given gumble Client and Source.
-func New(client *gumble.Client, source Source) *Stream {
+func New(client *gumble.Client, source Source, vol float32) *Stream {
 	return &Stream{
 		client:  client,
-		Volume:  1.0,
+		Volume:  vol,
 		Source:  source,
 		Command: "ffmpeg",
 		pause:   make(chan struct{}),
@@ -87,6 +86,7 @@ func (s *Stream) Play() error {
 	if s.Offset > 0 {
 		args = append([]string{"-ss", strconv.FormatFloat(s.Offset.Seconds(), 'f', -1, 64)}, args...)
 	}
+
 	args = append(args, "-ac", strconv.Itoa(gumble.AudioChannels), "-ar", strconv.Itoa(gumble.AudioSampleRate), "-f", "s16le", "-")
 	cmd := exec.Command(s.Command, args...)
 	var err error
@@ -170,10 +170,17 @@ func (s *Stream) process() {
 		case <-s.pause:
 			return
 		case <-ticker.C:
-			if _, err := io.ReadFull(s.pipe, byteBuffer); err != nil {
-				s.l.Lock()
-				s.cleanup()
-				return
+			n, err := io.ReadFull(s.pipe, byteBuffer)
+			if err != nil {
+				if (err == io.EOF || err == io.ErrUnexpectedEOF) && n > 0 {
+					for i := n; i < len(byteBuffer); i++ {
+						byteBuffer[i] = 0
+					}
+				} else {
+					s.l.Lock()
+					s.cleanup()
+					return
+				}
 			}
 			int16Buffer := make([]int16, frameSize)
 			for i := range int16Buffer {

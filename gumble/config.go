@@ -23,6 +23,10 @@ type Config struct {
 	// AudioDataBytes is the number of bytes that an audio frame can use.
 	AudioDataBytes int
 
+	// ForceTCP disables encrypted UDP voice transport and retains the legacy
+	// TCP UDPTunnel behavior for networks that deliberately block UDP.
+	ForceTCP bool
+
 	// The event listeners used when client events are triggered.
 	Listeners      Listeners
 	AudioListeners AudioListeners

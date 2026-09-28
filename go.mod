@@ -1,9 +1,7 @@
-module layeh.com/gumble
+// Keep this module path for source compatibility with existing TalkKonnect
+// imports. Consumers can point the requirement at this maintained fork.
+module github.com/talkkonnect/gumble
 
-go 1.12
+go 1.20
 
-require (
-	github.com/dchote/go-openal v0.0.0-20171116030048-f4a9a141d372
-	github.com/golang/protobuf v1.3.1
-	layeh.com/gopus v0.0.0-20161224163843-0ebf989153aa
-)
+require github.com/golang/protobuf v1.3.1

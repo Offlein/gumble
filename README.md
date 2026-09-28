@@ -4,49 +4,39 @@
 
 gumble is a [Mumble](https://mumble.info/) client implementation in Go
 
-## Sub-projects
+## TalkKonnect compatibility
 
-- gumble ([docs](https://pkg.go.dev/layeh.com/gumble/gumble))
-    - Client library
-- gumbleopenal ([docs](https://pkg.go.dev/layeh.com/gumble/gumbleopenal))
-    - [OpenAL](http://kcat.strangesoft.net/openal.html) audio system for gumble
-- gumbleffmpeg ([docs](https://pkg.go.dev/layeh.com/gumble/gumbleffmpeg))
-    - [ffmpeg](https://www.ffmpeg.org/) audio source for gumble
-- gumbleutil ([docs](https://pkg.go.dev/layeh.com/gumble/gumbleutil))
-    - Extras that can make working with gumble easier
+- Multi-channel listening (`AddListeningChannel` and
+  `RemoveListeningChannel`).
+- Raw Opus payload and sequence values on received audio packets, used by
+  TalkKonnect's multicast forwarding path.
+- Final partial frame handling for `gumbleffmpeg`.
 
-## Example
+## UDP voice transport
 
-```go
-package main
+The client establishes Mumble's regular TLS/TCP control channel first. After
+`CryptSetup`, it sends authenticated legacy OCB2-AES128 UDP pings to associate
+its UDP port with Murmur. Once a valid encrypted reply arrives, outgoing voice
+uses UDP and incoming UDP voice follows the normal audio-listener path.
 
-import (
-  "layeh.com/gumble/gumble"
-  "layeh.com/gumble/gumbleutil"
-)
+If UDP cannot be established or fails while sending, voice falls back to TCP
+`UDPTunnel` without dropping the control connection. Set `Config.ForceTCP` to
+deliberately retain the legacy TCP-only behavior.
 
-func main() {
-  gumbleutil.Main(gumbleutil.Listener{
-    UserChange: func(e *gumble.UserChangeEvent) {
-      if e.Type.Has(gumble.UserChangeConnected) {
-        e.User.Send("Welcome to the server, " + e.User.Name + "!")
-      }
-    },
-  })
-}
-```
+The module path intentionally remains `github.com/talkkonnect/gumble` for
+source compatibility. A TalkKonnect build can consume a maintained fork by
+replacing that module requirement with the fork's tagged version.
 
-## Related projects
+## Validation
 
-- [barnard](https://layeh.com/barnard)
-    - terminal-based Mumble client
-- [piepan](https://layeh.com/piepan)
-    - an easy to use framework for writing Mumble bots using Lua
+`go test ./gumble/...` covers legacy crypt-state vectors, UDP voice selection,
+and TCP fallback. `go test -tags integration ./gumble` runs the optional Murmur
+handshake test when `MUMBLE_UDP_TEST_ADDR` is set.
 
 ## License
 
 MPL 2.0
 
-## Author
+## Original Author
 
 Tim Cooper (<tim.cooper@layeh.com>)

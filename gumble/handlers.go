@@ -10,8 +10,8 @@ import (
 	"time"
 
 	"github.com/golang/protobuf/proto"
-	"layeh.com/gumble/gumble/MumbleProto"
-	"layeh.com/gumble/gumble/varint"
+	"github.com/talkkonnect/gumble/gumble/MumbleProto"
+	"github.com/talkkonnect/gumble/gumble/varint"
 )
 
 var (
@@ -113,8 +113,7 @@ func (c *Client) handleUDPTunnel(buffer []byte) error {
 	}
 
 	// Sequence
-	// TODO: use in jitter buffer
-	_, n = varint.Decode(buffer)
+	sequence, n := varint.Decode(buffer)
 	if n <= 0 {
 		return errInvalidProtobuf
 	}
@@ -131,6 +130,8 @@ func (c *Client) handleUDPTunnel(buffer []byte) error {
 	if audioLength > len(buffer) {
 		return errInvalidProtobuf
 	}
+	opusPayload := make([]byte, audioLength)
+	copy(opusPayload, buffer[:audioLength])
 
 	pcm, err := decoder.Decode(buffer[:audioLength], AudioMaximumFrameSize)
 	if err != nil {
@@ -144,6 +145,8 @@ func (c *Client) handleUDPTunnel(buffer []byte) error {
 			ID: uint32(audioTarget),
 		},
 		AudioBuffer: AudioBuffer(pcm),
+		OpusPayload: opusPayload,
+		Sequence:    uint16(sequence & 0xFFFF),
 	}
 
 	if len(buffer)-audioLength == 3*4 {
@@ -176,6 +179,22 @@ func (c *Client) handleUDPTunnel(buffer []byte) error {
 	c.volatile.Unlock()
 
 	return nil
+}
+
+// handleUDPPacket dispatches an authenticated UDP packet. Voice packets use
+// the same payload format as UDPTunnel; only their transport differs.
+func (c *Client) handleUDPPacket(buffer []byte) error {
+	if len(buffer) < 1 {
+		return errInvalidProtobuf
+	}
+	switch (buffer[0] >> 5) & 0x7 {
+	case 1: // Ping: a valid encrypted reply confirms the UDP route.
+		return nil
+	case audioCodecIDOpus:
+		return c.handleUDPTunnel(buffer)
+	default:
+		return errUnsupportedAudio
+	}
 }
 
 func (c *Client) handleAuthenticate(buffer []byte) error {
@@ -896,7 +915,44 @@ func (c *Client) handleQueryUsers(buffer []byte) error {
 }
 
 func (c *Client) handleCryptSetup(buffer []byte) error {
-	return errUnimplementedHandler
+	var packet MumbleProto.CryptSetup
+	if err := proto.Unmarshal(buffer, &packet); err != nil {
+		return err
+	}
+
+	if len(packet.Key) > 0 {
+		if err := c.udpCrypt.SetKey(packet.Key, packet.ClientNonce, packet.ServerNonce); err != nil {
+			return err
+		}
+		atomic.StoreUint32(&c.udpActive, 0)
+		c.startUDP()
+		return nil
+	}
+
+	// A nonce-only reply carries the server's current sending nonce. Older
+	// servers use the ClientNonce field for the response to an empty
+	// CryptSetup; newer ones may use ServerNonce. Either form resets our
+	// decryption direction.
+	serverNonce := packet.ServerNonce
+	if len(serverNonce) == 0 {
+		serverNonce = packet.ClientNonce
+	}
+	if len(serverNonce) > 0 {
+		if err := c.udpCrypt.SetDecryptIV(serverNonce); err != nil {
+			return err
+		}
+		atomic.StoreUint32(&c.udpActive, 0)
+		c.sendUDPPing(uint64(time.Now().UnixNano()))
+		return nil
+	}
+
+	// An empty CryptSetup asks the client to send the nonce it is currently
+	// encrypting with. This is the legacy Mumble crypt resynchronization path.
+	if c.udpCrypt.Ready() {
+		nonce := c.udpCrypt.EncryptIV()
+		return c.Conn.WriteProto(&MumbleProto.CryptSetup{ClientNonce: nonce})
+	}
+	return errInvalidProtobuf
 }
 
 func (c *Client) handleContextActionModify(buffer []byte) error {
