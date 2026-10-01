@@ -4,6 +4,27 @@
 
 gumble is a [Mumble](https://mumble.info/) client implementation in Go
 
+#### About this fork
+This fork takes the [talkkonnect/gumble](https://github.com/talkkonnect/gumble)
+fork and uses the some things written specifically by the talKKonnect folks:
+ - TalkKonnect multi-channel listening (AddListeningChannel, RemoveListeningChannel)
+ - Existing voice-target behavior
+ - Raw received Opus payload and packet sequence fields used by TalkKonnect multicast
+ - The TalkKonnect FFmpeg partial-final-frame fix
+
+Then it adds UDP functionality following, which was stolen/backported from the old
+[Grumble server](https://github.com/mumble-voip/grumble implementation (this is an
+actual server - otherwise irrelevant to what Gumble, a client, does). That
+functionality was:
+ - CryptSetup handling
+ - Encrypted Mumble UDP negotiation, send, and receive
+ - UDP voice after validation
+ - TCP tunnel fallback and nonce resync
+
+Fair warning, this code was merged by me (Offlein) using AI software support. I am
+not a Go developer normally. (And am probably not one now!) But I am a software 
+dev generally, and the generated code makes sense superficially to me.
+
 ## TalkKonnect compatibility
 
 - Multi-channel listening (`AddListeningChannel` and
