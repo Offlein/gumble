@@ -360,7 +360,12 @@ func (c *Client) writeAudio(format, target byte, sequence int64, final bool, dat
 	if err != nil {
 		return err
 	}
-	if !c.Config.ForceTCP && atomic.LoadUint32(&c.udpActive) == 1 {
+	// CryptSetup provides all of the material needed to encrypt UDP voice.
+	// Do not wait for an inbound datagram before sending: the first outbound
+	// voice packet (or UDP ping) is what associates a client with its UDP
+	// endpoint on many Mumble servers. udpActive remains a receive-path health
+	// statistic, not a transport-selection gate.
+	if !c.Config.ForceTCP && c.udpCrypt.Ready() {
 		if err := c.sendUDP(payload); err == nil {
 			return nil
 		}
