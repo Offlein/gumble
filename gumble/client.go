@@ -3,6 +3,8 @@ package gumble
 import (
 	"crypto/tls"
 	"errors"
+	"fmt"
+	"log"
 	"math"
 	"net"
 	"runtime"
@@ -65,6 +67,7 @@ type Client struct {
 	udpActive  uint32
 	udpPackets uint32
 	udpResync  int64
+	udpLogAt   int64
 
 	// A collection containing the server's context actions.
 	ContextActions ContextActions
@@ -311,13 +314,27 @@ func (c *Client) udpRoutine() {
 			// UDP is lossy. Ignore invalid or stale datagrams; a later valid
 			// packet re-establishes the path without harming TLS/TCP. Request a
 			// nonce refresh at most once per five seconds.
+			c.logUDPError("decrypt failed (%v); requesting nonce resynchronization", err)
 			c.requestCryptResync()
 			continue
 		}
 		atomic.StoreUint32(&c.udpActive, 1)
 		atomic.AddUint32(&c.udpPackets, 1)
-		_ = c.handleUDPPacket(plain)
+		if err := c.handleUDPPacket(plain); err != nil {
+			c.logUDPError("packet rejected (%v)", err)
+		}
 	}
+}
+
+// logUDPError makes UDP receive failures visible without flooding normal
+// application logs when a network path is unhealthy.
+func (c *Client) logUDPError(format string, args ...interface{}) {
+	now := time.Now().Unix()
+	last := atomic.LoadInt64(&c.udpLogAt)
+	if now-last < 5 || !atomic.CompareAndSwapInt64(&c.udpLogAt, last, now) {
+		return
+	}
+	log.Printf("warn: Mumble UDP %s", fmt.Sprintf(format, args...))
 }
 
 func (c *Client) requestCryptResync() {
